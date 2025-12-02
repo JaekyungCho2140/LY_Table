@@ -17,6 +17,14 @@ import customtkinter as ctk
 from .merge import merge_files
 from .split import split_file
 from .validator import ValidationError, extract_date
+from .batch_merger import (
+    scan_batch_folders,
+    validate_batch_selection,
+    merge_batches,
+    BatchMergerError,
+    UserCancelledError
+)
+from .batch_ui import BatchSelectionDialog
 
 
 # 설정 파일 경로
@@ -35,7 +43,7 @@ class LYTableApp(ctk.CTk):
 
         # 윈도우 설정
         self.title("LY/GL 미네 전용 도구")
-        self.geometry("400x250")
+        self.geometry("400x330")
         self.resizable(False, False)
 
         # 설정 로드
@@ -90,7 +98,7 @@ class LYTableApp(ctk.CTk):
             font=("맑은 고딕", 20, "bold"),
             text_color="#1e293b",
         )
-        self.header.pack(pady=(30, 40))
+        self.header.pack(pady=(30, 30))
 
         # Merge 버튼
         self.btn_merge = ctk.CTkButton(
@@ -103,7 +111,7 @@ class LYTableApp(ctk.CTk):
             font=("맑은 고딕", 14, "bold"),
             command=self._on_merge_click,
         )
-        self.btn_merge.pack(pady=8)
+        self.btn_merge.pack(pady=6)
 
         # Split 버튼
         self.btn_split = ctk.CTkButton(
@@ -119,7 +127,20 @@ class LYTableApp(ctk.CTk):
             font=("맑은 고딕", 14, "bold"),
             command=self._on_split_click,
         )
-        self.btn_split.pack(pady=8)
+        self.btn_split.pack(pady=6)
+
+        # Merge Batches 버튼 (신규)
+        self.btn_merge_batches = ctk.CTkButton(
+            self,
+            text="📦 Merge Batches",
+            width=250,
+            height=44,
+            fg_color="#0ea5e9",
+            hover_color="#0284c7",
+            font=("맑은 고딕", 14, "bold"),
+            command=self._on_merge_batches_click,
+        )
+        self.btn_merge_batches.pack(pady=6)
 
         # 진행 상태 레이블 (숨김)
         self.status_label = ctk.CTkLabel(
@@ -133,6 +154,7 @@ class LYTableApp(ctk.CTk):
         """처리 중 UI 표시"""
         self.btn_merge.pack_forget()
         self.btn_split.pack_forget()
+        self.btn_merge_batches.pack_forget()
 
         # 시작 시간 기록
         self.start_time = time.time()
@@ -148,8 +170,9 @@ class LYTableApp(ctk.CTk):
         self.status_label.pack_forget()
         self.progress_bar.pack_forget()
 
-        self.btn_merge.pack(pady=8)
-        self.btn_split.pack(pady=8)
+        self.btn_merge.pack(pady=6)
+        self.btn_split.pack(pady=6)
+        self.btn_merge_batches.pack(pady=6)
 
     def _on_merge_click(self):
         """Merge 버튼 클릭 핸들러"""
@@ -346,6 +369,137 @@ class LYTableApp(ctk.CTk):
                 self.after(0, self._show_initial_ui)
 
         thread = threading.Thread(target=split_thread, daemon=True)
+        thread.start()
+
+    def _on_merge_batches_click(self):
+        """Merge Batches 버튼 클릭 핸들러"""
+        if self.is_processing:
+            return
+
+        # 1. 루트 폴더 선택
+        initial_dir = self._get_last_directory("merge_batches_root")
+        root_folder = filedialog.askdirectory(
+            title="배치 폴더가 있는 루트 폴더 선택",
+            initialdir=initial_dir
+        )
+
+        if not root_folder:
+            return
+
+        # 선택한 디렉토리 저장
+        self._save_last_directory("merge_batches_root", root_folder)
+
+        # 2. 배치 폴더 스캔
+        try:
+            from pathlib import Path
+            batch_info = scan_batch_folders(Path(root_folder))
+
+        except BatchMergerError as e:
+            messagebox.showerror("배치 스캔 오류", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("오류", f"배치 폴더 스캔 중 오류가 발생했습니다.\n\n{e}")
+            return
+
+        # 3. 배치 선택 UI 표시
+        self._show_batch_selection_dialog(root_folder, batch_info)
+
+    def _show_batch_selection_dialog(self, root_folder: str, batch_info: dict):
+        """배치 선택 다이얼로그 표시"""
+
+        def on_confirm(selected_batches: list):
+            """확인 버튼 콜백"""
+            # 선택 검증
+            is_valid, error_msg = validate_batch_selection(selected_batches, batch_info)
+
+            if not is_valid:
+                messagebox.showerror("선택 오류", error_msg)
+                # 다이얼로그는 닫히지 않음 (사용자가 다시 선택 가능)
+                self._show_batch_selection_dialog(root_folder, batch_info)
+                return
+
+            # 병합 수행
+            self._perform_merge_batches(root_folder, selected_batches, batch_info)
+
+        def on_cancel():
+            """취소 버튼 콜백"""
+            pass  # 창만 닫힘
+
+        # 배치 선택 다이얼로그 생성
+        BatchSelectionDialog(self, batch_info, on_confirm, on_cancel)
+
+    def _perform_merge_batches(self, root_folder: str, selected_batches: list, batch_info: dict):
+        """Merge Batches 작업 수행"""
+        self.is_processing = True
+        self._show_processing_ui()
+
+        # 취소 플래그
+        self.cancel_requested = False
+
+        def progress_callback(percent: int, message: str):
+            """진행률 콜백"""
+            self.after(0, self._update_progress, percent, message)
+
+        def cancel_check():
+            """취소 확인"""
+            return self.cancel_requested
+
+        def overwrite_callback(existing_files: list) -> bool:
+            """덮어쓰기 확인 콜백"""
+            result = messagebox.askyesno(
+                "파일 덮어쓰기 확인",
+                f"다음 파일이 이미 존재합니다:\n\n" +
+                "\n".join(f"- {f}" for f in existing_files) +
+                "\n\n덮어쓰시겠습니까?"
+            )
+            return result
+
+        def merge_batches_thread():
+            """Merge Batches 스레드"""
+            try:
+                from pathlib import Path
+
+                # 배치 병합 수행
+                saved_files, log_path = merge_batches(
+                    Path(root_folder),
+                    selected_batches,
+                    batch_info,
+                    progress_callback,
+                    cancel_check,
+                    overwrite_callback
+                )
+
+                # 소요 시간 계산
+                elapsed_time = time.time() - self.start_time
+                time_str = self._format_time(elapsed_time)
+
+                # 성공 메시지
+                file_list = "\n".join([f"✓ {Path(p).name}" for p in saved_files.values()])
+                success_msg = (
+                    f"생성된 파일:\n{file_list}\n\n"
+                    f"로그 파일: {Path(log_path).name}\n\n"
+                    f"소요 시간: {time_str}"
+                )
+                self.after(0, self._show_success, "Merge Batches 완료!", success_msg)
+
+            except UserCancelledError:
+                # 사용자 취소
+                self.after(0, self._show_error, "취소됨", "작업이 취소되었습니다.")
+
+            except BatchMergerError as e:
+                # 배치 병합 오류
+                self.after(0, self._show_error, "Merge Batches 오류", str(e))
+
+            except Exception as e:
+                # 기타 오류
+                self.after(0, self._show_error, "오류", str(e))
+
+            finally:
+                self.is_processing = False
+                self.cancel_requested = False
+                self.after(0, self._show_initial_ui)
+
+        thread = threading.Thread(target=merge_batches_thread, daemon=True)
         thread.start()
 
     def _update_progress(self, percent: int, message: str):

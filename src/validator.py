@@ -44,7 +44,10 @@ FILE_PATTERNS = {
 class ValidationError(Exception):
     """데이터 검증 에러"""
 
-    pass
+    def __init__(self, message: str, error_code: str = None, **kwargs):
+        super().__init__(message)
+        self.error_code = error_code
+        self.params = kwargs
 
 
 def validate_file_name(file_path: Path, file_type: str) -> bool:

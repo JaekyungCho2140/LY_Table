@@ -11,7 +11,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="ly-table-tool",
-    version="1.2.0",
+    version="1.3.0",
     author="LY/GL Team",
     description="Excel table processing tool for MMORPG game string translation management",
     long_description=long_description,
