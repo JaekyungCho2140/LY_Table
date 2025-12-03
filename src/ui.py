@@ -25,6 +25,7 @@ from .batch_merger import (
     UserCancelledError
 )
 from .batch_ui import BatchSelectionDialog
+from .legacy_diff import legacy_diff, generate_diff_filename, LegacyDiffError
 
 
 # 설정 파일 경로
@@ -43,7 +44,7 @@ class LYTableApp(ctk.CTk):
 
         # 윈도우 설정
         self.title("LY/GL 미네 전용 도구")
-        self.geometry("400x330")
+        self.geometry("400x410")  # v1.4.0: 버튼 4개 수용
         self.resizable(False, False)
 
         # 설정 로드
@@ -129,7 +130,7 @@ class LYTableApp(ctk.CTk):
         )
         self.btn_split.pack(pady=6)
 
-        # Merge Batches 버튼 (신규)
+        # Merge Batches 버튼
         self.btn_merge_batches = ctk.CTkButton(
             self,
             text="📦 Merge Batches",
@@ -141,6 +142,19 @@ class LYTableApp(ctk.CTk):
             command=self._on_merge_batches_click,
         )
         self.btn_merge_batches.pack(pady=6)
+
+        # Legacy Diff 버튼 (v1.4.0 신규)
+        self.btn_legacy_diff = ctk.CTkButton(
+            self,
+            text="🔍 Legacy Diff",
+            width=250,
+            height=44,
+            fg_color="#8b5cf6",
+            hover_color="#7c3aed",
+            font=("맑은 고딕", 14, "bold"),
+            command=self._on_legacy_diff_click,
+        )
+        self.btn_legacy_diff.pack(pady=6)
 
         # 진행 상태 레이블 (숨김)
         self.status_label = ctk.CTkLabel(
@@ -155,6 +169,7 @@ class LYTableApp(ctk.CTk):
         self.btn_merge.pack_forget()
         self.btn_split.pack_forget()
         self.btn_merge_batches.pack_forget()
+        self.btn_legacy_diff.pack_forget()
 
         # 시작 시간 기록
         self.start_time = time.time()
@@ -173,6 +188,7 @@ class LYTableApp(ctk.CTk):
         self.btn_merge.pack(pady=6)
         self.btn_split.pack(pady=6)
         self.btn_merge_batches.pack(pady=6)
+        self.btn_legacy_diff.pack(pady=6)
 
     def _on_merge_click(self):
         """Merge 버튼 클릭 핸들러"""
@@ -407,10 +423,10 @@ class LYTableApp(ctk.CTk):
     def _show_batch_selection_dialog(self, root_folder: str, batch_info: dict):
         """배치 선택 다이얼로그 표시"""
 
-        def on_confirm(selected_batches: list):
-            """확인 버튼 콜백"""
+        def on_confirm(selected_batches: list, base_batch: str):
+            """확인 버튼 콜백 (v1.4.0: base_batch 추가)"""
             # 선택 검증
-            is_valid, error_msg = validate_batch_selection(selected_batches, batch_info)
+            is_valid, error_msg = validate_batch_selection(selected_batches, base_batch, batch_info)
 
             if not is_valid:
                 messagebox.showerror("선택 오류", error_msg)
@@ -418,8 +434,8 @@ class LYTableApp(ctk.CTk):
                 self._show_batch_selection_dialog(root_folder, batch_info)
                 return
 
-            # 병합 수행
-            self._perform_merge_batches(root_folder, selected_batches, batch_info)
+            # 병합 수행 (v1.4.0: base_batch 추가)
+            self._perform_merge_batches(root_folder, selected_batches, base_batch, batch_info)
 
         def on_cancel():
             """취소 버튼 콜백"""
@@ -428,8 +444,8 @@ class LYTableApp(ctk.CTk):
         # 배치 선택 다이얼로그 생성
         BatchSelectionDialog(self, batch_info, on_confirm, on_cancel)
 
-    def _perform_merge_batches(self, root_folder: str, selected_batches: list, batch_info: dict):
-        """Merge Batches 작업 수행"""
+    def _perform_merge_batches(self, root_folder: str, selected_batches: list, base_batch: str, batch_info: dict):
+        """Merge Batches 작업 수행 (v1.4.0: base_batch 추가)"""
         self.is_processing = True
         self._show_processing_ui()
 
@@ -459,10 +475,11 @@ class LYTableApp(ctk.CTk):
             try:
                 from pathlib import Path
 
-                # 배치 병합 수행
+                # 배치 병합 수행 (v1.4.0: base_batch 추가)
                 saved_files, log_path = merge_batches(
                     Path(root_folder),
                     selected_batches,
+                    base_batch,
                     batch_info,
                     progress_callback,
                     cancel_check,
@@ -558,6 +575,117 @@ class LYTableApp(ctk.CTk):
     def _show_error(self, title: str, message: str):
         """에러 메시지 표시"""
         messagebox.showerror(title, message)
+
+    # ========== Legacy Diff (v1.4.0) ==========
+
+    def _on_legacy_diff_click(self):
+        """Legacy Diff 버튼 클릭 핸들러"""
+        if self.is_processing:
+            return
+
+        # 1. 비교1 폴더 선택
+        initial_dir = self._get_last_directory("legacy_diff_folder1")
+        folder1 = filedialog.askdirectory(
+            title="비교1 폴더 선택 (이전 버전)",
+            initialdir=initial_dir
+        )
+
+        if not folder1:
+            return
+
+        self._save_last_directory("legacy_diff_folder1", folder1)
+
+        # 2. 비교2 폴더 선택
+        initial_dir = self._get_last_directory("legacy_diff_folder2")
+        folder2 = filedialog.askdirectory(
+            title="비교2 폴더 선택 (현재 버전)",
+            initialdir=initial_dir
+        )
+
+        if not folder2:
+            return
+
+        self._save_last_directory("legacy_diff_folder2", folder2)
+
+        # 3. 출력 파일 위치 선택
+        initial_dir = self._get_last_directory("legacy_diff_output")
+        output_filename = generate_diff_filename()
+        output_path = filedialog.asksaveasfilename(
+            title="결과 파일 저장 위치 선택",
+            initialdir=initial_dir,
+            defaultextension=".xlsx",
+            initialfile=output_filename,
+            filetypes=[("Excel 파일", "*.xlsx")]
+        )
+
+        if not output_path:
+            return
+
+        self._save_last_directory("legacy_diff_output", str(Path(output_path).parent))
+
+        # 4. Legacy Diff 수행
+        self._perform_legacy_diff(folder1, folder2, output_path)
+
+    def _perform_legacy_diff(self, folder1: str, folder2: str, output_path: str):
+        """Legacy Diff 작업 수행"""
+        self.is_processing = True
+        self._show_processing_ui()
+
+        def progress_callback(percent: int, message: str):
+            """진행률 콜백"""
+            self.after(0, self._update_progress, percent, message)
+
+        def legacy_diff_thread():
+            """Legacy Diff 스레드"""
+            try:
+                from pathlib import Path
+
+                # Legacy Diff 수행
+                result_path, stats = legacy_diff(
+                    Path(folder1),
+                    Path(folder2),
+                    Path(output_path),
+                    progress_callback
+                )
+
+                # 소요 시간 계산
+                elapsed_time = time.time() - self.start_time
+                time_str = self._format_time(elapsed_time)
+
+                # 통계 정보 생성
+                total_changes = sum(stats.values())
+                stats_lines = []
+                for lang in ['EN', 'CT', 'CS', 'JA', 'TH', 'PT-BR', 'RU']:
+                    count = stats.get(lang, 0)
+                    if count > 0:
+                        stats_lines.append(f"  - {lang}: {count}개")
+
+                # 성공 메시지
+                success_msg = (
+                    f"비교1: {folder1}\n"
+                    f"비교2: {folder2}\n\n"
+                    f"변경된 KEY: {total_changes}개\n"
+                    f"언어별 변경 현황:\n"
+                    + "\n".join(stats_lines) + "\n\n"
+                    f"출력 파일: {Path(output_path).name}\n\n"
+                    f"소요 시간: {time_str}"
+                )
+                self.after(0, self._show_success, "Legacy Diff 완료!", success_msg)
+
+            except LegacyDiffError as e:
+                # Legacy Diff 오류
+                self.after(0, self._show_error, "Legacy Diff 오류", str(e))
+
+            except Exception as e:
+                # 기타 오류
+                self.after(0, self._show_error, "오류", str(e))
+
+            finally:
+                self.is_processing = False
+                self.after(0, self._show_initial_ui)
+
+        thread = threading.Thread(target=legacy_diff_thread, daemon=True)
+        thread.start()
 
 
 def run_app():

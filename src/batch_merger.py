@@ -132,6 +132,80 @@ def sort_batches(batch_names: List[str]) -> List[str]:
     return regular + [b for _, b in extras]
 
 
+def apply_status_completion(final_data: Dict[str, List[List]]) -> Dict[str, List[List]]:
+    """
+    Status 자동 완료 처리
+
+    '번역필요', '수정' 상태를 '완료'로 변경합니다.
+
+    Args:
+        final_data: {언어코드: [[헤더], [행1], [행2], ...]}
+
+    Returns:
+        Status 변경된 데이터
+
+    Reference:
+        PRD v1.4.0 섹션 1.2
+    """
+    STATUS_MAPPING = {
+        "번역필요": "완료",
+        "수정": "완료"
+    }
+
+    for lang_code in final_data.keys():
+        rows = final_data[lang_code]
+
+        # 헤더 제외하고 처리
+        for row_idx in range(1, len(rows)):
+            row = rows[row_idx]
+
+            if len(row) >= 5:  # Status는 5번째 컬럼 (E열, 인덱스 4)
+                current_status = row[4]
+
+                # 매핑에 있으면 변경
+                if current_status in STATUS_MAPPING:
+                    row[4] = STATUS_MAPPING[current_status]
+
+    return final_data
+
+
+def sort_batches_with_base(batch_names: List[str], base_batch: str) -> List[str]:
+    """
+    배치명 정렬 (기준 배치 우선)
+
+    Args:
+        batch_names: 배치명 리스트
+        base_batch: 기준 배치명
+
+    Returns:
+        정렬된 배치명 리스트 (base_batch가 첫 번째)
+
+    Reference:
+        PRD v1.4.0 섹션 2.5
+    """
+    # 기준 배치 제외
+    other_batches = [b for b in batch_names if b != base_batch]
+
+    # REGULAR/EXTRA 분류
+    regular = []
+    extras = []
+
+    for batch in other_batches:
+        if batch == 'REGULAR':
+            regular.append(batch)
+        elif batch.startswith('EXTRA'):
+            num = int(batch[5:])
+            extras.append((num, batch))
+
+    # EXTRA 번호순 정렬
+    extras.sort(key=lambda x: x[0])
+
+    # 기준 배치 + REGULAR (있으면) + EXTRA 순
+    sorted_others = regular + [b for _, b in extras]
+
+    return [base_batch] + sorted_others
+
+
 def scan_batch_folders(root_folder: Path) -> Dict:
     """
     배치 폴더 스캔 및 검증
@@ -248,44 +322,56 @@ def validate_batch_files(batch_folder: Path, batch_name: str) -> Dict:
     }
 
 
-def validate_batch_selection(selected_batches: List[str], batch_info: Dict) -> Tuple[bool, str]:
+def validate_batch_selection(
+    selected_batches: List[str],
+    base_batch: Optional[str],
+    batch_info: Dict
+) -> Tuple[bool, str]:
     """
     배치 선택 검증
 
     Args:
         selected_batches: 선택된 배치명 리스트
+        base_batch: 기준 배치명 (None이면 미선택)
         batch_info: scan_batch_folders() 결과
 
     Returns:
         (유효성, 오류 메시지)
 
     Reference:
-        PRD 섹션 2.4.3
+        PRD v1.4.0 섹션 2.4
     """
-    # 1. 최소 선택 수 (2개 이상)
+    # 1. 기준 배치 선택 확인
+    if not base_batch:
+        return False, (
+            "기준 배치를 선택해주세요.\n\n"
+            "기준 배치는 적재 순서의 첫 번째가 되는 배치입니다.\n"
+            "라디오 버튼으로 선택해주세요."
+        )
+
+    # 2. 기준 배치가 선택된 배치에 포함되는지 확인
+    if base_batch not in selected_batches:
+        return False, f"기준 배치 {base_batch}가 선택되지 않았습니다."
+
+    # 3. 최소 선택 수 (2개 이상)
     if len(selected_batches) < 2:
         return False, get_user_friendly_message("SELECTION_TOO_FEW", count=len(selected_batches))
 
-    # 2. REGULAR 필수
-    if 'REGULAR' not in selected_batches:
-        return False, get_user_friendly_message("SELECTION_REGULAR_MISSING")
-
-    # 3. REGULAR 완전성 검증
-    if batch_info['REGULAR']['file_count'] != 7:
-        missing = batch_info['REGULAR']['missing_languages']
+    # 4. 기준 배치 완전성 검증
+    if batch_info[base_batch]['file_count'] != 7:
+        missing = batch_info[base_batch]['missing_languages']
         return False, get_user_friendly_message(
             "BATCH_INCOMPLETE",
-            batch="REGULAR",
+            batch=base_batch,
             missing=', '.join(missing)
         )
 
-    # 4. 선택된 배치 완전성 검증
+    # 5. 선택된 배치 완전성 검증
     for batch in selected_batches:
         if not batch_info[batch]['valid']:
             # 중복 파일 확인
             if batch_info[batch]['duplicate_languages']:
                 dup_lang = batch_info[batch]['duplicate_languages'][0]
-                # 중복 파일 목록 가져오기 (실제 파일 스캔 필요)
                 return False, get_user_friendly_message(
                     "BATCH_FILE_DUPLICATE",
                     batch=batch,
@@ -827,6 +913,7 @@ def generate_merge_batches_log(log_info: Dict, output_folder: Path) -> Path:
 def merge_batches(
     root_folder: Path,
     selected_batches: List[str],
+    base_batch: str,
     batch_info: Dict,
     progress_callback=None,
     cancel_check=None,
@@ -838,6 +925,7 @@ def merge_batches(
     Args:
         root_folder: 루트 폴더 경로
         selected_batches: 선택된 배치 목록
+        base_batch: 기준 배치명 (첫 번째로 적재됨)
         batch_info: 배치 정보
         progress_callback: 진행률 콜백 함수(percent, message)
         cancel_check: 취소 확인 함수 (returns bool)
@@ -851,15 +939,19 @@ def merge_batches(
         UserCancelledError: 사용자 취소 시
 
     Reference:
-        PRD 섹션 2.4
+        PRD v1.4.0 섹션 2, 기능 1, 기능 2
     """
     start_time = datetime.now()
+
+    # 배치 순서 정렬 (기준 배치 우선)
+    sorted_batches = sort_batches_with_base(selected_batches, base_batch)
 
     # 로그 정보 초기화
     log_info = {
         'start_time': start_time,
         'root_folder': str(root_folder),
-        'selected_batches': selected_batches,
+        'selected_batches': sorted_batches,
+        'base_batch': base_batch,
         'batch_processing': [],
         'duplicate_log': [],
         'final_stats': {},
@@ -876,10 +968,10 @@ def merge_batches(
         language_data = {}
         batch_row_counts = {}
 
-        total_batches = len(selected_batches)
+        total_batches = len(sorted_batches)
         load_weight = 40.0  # 40%
 
-        for batch_idx, batch_name in enumerate(selected_batches):
+        for batch_idx, batch_name in enumerate(sorted_batches):
             batch_start_progress = 5 + (batch_idx / total_batches) * load_weight
 
             if progress_callback:
@@ -900,7 +992,7 @@ def merge_batches(
             )
 
             if batch_idx == 0:
-                # 첫 배치: 데이터 초기화
+                # 첫 배치 (기준 배치): 데이터 초기화
                 for lang in VALID_LANGUAGES:
                     language_data[lang] = merge_batches_for_language(
                         lang, [batch_name], {batch_name: batch_info[batch_name]}, root_folder, cancel_check
@@ -929,13 +1021,22 @@ def merge_batches(
         if progress_callback:
             progress_callback(50, "중복 KEY 제거 중...")
 
-        final_data, duplicate_log = remove_duplicate_keys(language_data, selected_batches, batch_row_counts)
+        final_data, duplicate_log = remove_duplicate_keys(language_data, sorted_batches, batch_row_counts)
 
         log_info['duplicate_log'] = duplicate_log
         log_info['final_data'] = final_data
 
         if progress_callback:
-            progress_callback(80, "중복 제거 완료")
+            progress_callback(75, "중복 제거 완료")
+
+        # Step 4.5: Status 자동 완료 처리 (PRD v1.4.0 기능 1)
+        if progress_callback:
+            progress_callback(78, "Status 자동 완료 처리 중...")
+
+        final_data = apply_status_completion(final_data)
+
+        if progress_callback:
+            progress_callback(80, "Status 처리 완료")
 
         # 최종 통계
         total_rows = sum(len(data) - 1 for data in language_data.values()) // 7  # 헤더 제외, 언어 평균
